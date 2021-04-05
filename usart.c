@@ -59,21 +59,6 @@ void USART_SendString(char *str)					/* Send string of USART data function */
 		i++;
 	}
 }
-uint8_t USART_ReceivePolling()
-{
-	uint8_t DataByte;
-	while (( UCSR0A & (1<<RXC0)) == 0) {}; // Do nothing until data have been received
-	DataByte = UDR0 ;
-	return DataByte;
-}
-
-void USART_TransmitPolling(uint8_t DataByte)
-{
-	while (( UCSR0A & (1<<UDRE0)) == 0) {}; // Do nothing until UDR is ready
-	UDR0 = DataByte;
-}
-
-
 void readString(char myString[], uint8_t maxLength) {
 	//char response;
 	uint8_t i;
