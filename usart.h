@@ -1,14 +1,13 @@
+/*
+ * usart.h
+ *
+ * Created: 19.02.2021 19:24:22
+ *  Author: Userr
+ */ 
+
 
 #ifndef USART_H_
 #define USART_H_
-// #define F_CPU 16000000UL						/* Define CPU clock Frequency e.g. here its 8MHz */
-// #include <avr/io.h>							/* Include AVR std. library file */
-// #include <avr/interrupt.h>
-// #include "usart.h"
-
-//#define BAUD_PRESCALE (((F_CPU / (BAUDRATE * 16UL))) - 1)
-// #define   USART_HAS_DATA   bit_is_set(UCSR0A, RXC0)
-// #define   USART_READY      bit_is_set(UCSR0A, UDRE0)
 void USART_Init();
 void USART_TransmitInterrupt(uint8_t Buffer);
 uint8_t USART_ReceivePolling();
