@@ -20,7 +20,8 @@
 #define Ignition_IN			PC2
 #define Temp_Pin			PC3
 #define Door_Pin		PC4
-//#define ACC_Pin			PC5
+#define ACC_Pin			PC5
+#define RESET_Pin		PC6
 
 #define AUTOMAT			PD0
 #define SHOCK_Sensor_Lite	PD2
@@ -30,47 +31,47 @@
 #define GENERATOR		PD6
 #define NAKAL_ON_OFF	PD7
 
+#define MEMORY_LITE 1 //shock sensor lite
+#define MEMORY_HARD 2 // shock sensor hard
+#define MEMORY_DOOR 3 // sensor door
 #define setBit(sfr, bit)     (_SFR_BYTE(sfr) |= (1 << bit))
 #define clearBit(sfr, bit)   (_SFR_BYTE(sfr) &= ~(1 << bit))
 #define toggleBit(sfr, bit) (_SFR_BYTE(sfr) ^= (1 << bit))
 //#define getBit(sfr, bit)	(_SFR_BYTE(sfr) & (1<<(bit)))
 
-#define PERIOD_PRESETS 15 //sec
-#define MAX_TIME_SHOCK 7 //sec
+#define PERIOD_PRESETS 20 //sec
 #define LOCK_TIME_SHOCK 10 //sec
-#define MAX_CNT_SHOCK 5 //cnt
+#define MAX_CNT_SHOCK 4 //cnt
 #define ALARM_TIMER 90 //sec
 #define HEATING_TIMER 900 //sec
-#define BTN_DEBOUCE 200 //ms
-#define DELAY_START_SECURITY 2
+#define BTN_DEBOUCE 10 //
+#define DEBOUNCECYCLES 5 //5 cycles. timer 16 ms
+#define DELAY_START_SECURITY 10
+
 uint8_t heating = 0;
 uint8_t security = 0;
 uint8_t allPresets;
 uint8_t startOK;
 uint8_t flagAlarm;
 uint8_t flagBlinkShock;
-uint8_t flag2Vibro1 = 0;
 uint8_t autoTransmission = 0;
 uint8_t flagNakal = 0;
 uint8_t flagOnePresets = 0;
 uint8_t flagTwoPresets = 0;
-uint32_t timeAlarmStart;			// save start alarm
-uint32_t timeStarterON, timerHeating;
-uint32_t timerOnePresets;			//timer one preset
-uint32_t timeOverCnt = 0;
-uint32_t timeStartSecurity = 0;
 uint8_t tempFlagSec = 0;
+uint8_t memory = 0;
+uint32_t timeAlarmStart;			// save start alarm
+uint32_t timerHeating;
+uint32_t timerOnePresets;			//timer one preset
+uint32_t timeStartSecurity = 0;
+uint32_t timeStartFirstCnt = 0;
 
-volatile uint8_t cntVibro1 = 0;
-volatile uint8_t flagVibro1 = 0;
-volatile uint8_t timerBlink;
-volatile uint8_t timerBlinkSec = 0;
-volatile uint8_t Timer_alarm;
-volatile uint32_t timeStartFirstCnt = 0;
+volatile uint8_t cntShock1 = 0;
+volatile uint8_t cntTimer0 = 0;
+volatile uint8_t cntTimer2 = 0;
 volatile uint32_t seconds = 0;
-volatile uint32_t milliseconds = 0;
-volatile uint32_t tempmilliseconds = 0;
-
+volatile uint8_t integrator;
+uint8_t output;
 
 long map(long x, long in_min, long in_max, long out_min, long out_max)
 {
@@ -78,31 +79,35 @@ long map(long x, long in_min, long in_max, long out_min, long out_max)
 }
 void timer0_init() // initialize timer0, interrupt and variable
 {
-	TCCR0 |= (1 << CS01) | (1 << CS00);
-	TIMSK |= (1 << TOIE0);
+	TCCR0A = 0;
+	TCCR0B = 0;
+	TCNT0 = 0;
+	// 62.5 Hz (1000000/((249+1)*64))
+	OCR0A = 249;
+	TCCR0A |= (1 << WGM01);
+	TCCR0B |= (1 << CS02) | (1 << CS00);
+	TIMSK0 |= (1 << OCIE0A);
 }
 void timer1_init()
 {
-	TCCR1B |= (1 << WGM12)|(1 << CS12);
+	TCCR1A = 0;
+	TCCR1B = 0;
 	TCNT1 = 0;
-	OCR1A = 31250;// 500 ms
-	TIMSK |= (1 << OCIE1A);
+	OCR1A = 0x3D08;
+	TCCR1B |= (1 << WGM12);
+	TIMSK1 |= (1 << OCIE1A);
+	TCCR1B |= (1 << CS12) | (1 << CS10);
+	// set prescaler to 1024 and start the timer
 }
 void timer2_init() // initialize timer2, interrupt and variable
 {
-	OCR2 = 162;
-	TCCR2 |= (1 << WGM21);// Set to CTC Mode
-	TIMSK |= (1 << OCIE2); //Set interrupt on compare match
-	TCCR2 |= (1 << CS20) | (1 << CS21) | (1 << CS22);
-}
-uint32_t millis_get()
-{
-	uint32_t millisec;
-	ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-	{
-		millisec = milliseconds;
-	}
-	return millisec;
+	TCCR2A = 0;
+	TCCR2B = 0;
+	TCNT2 = 0;
+	OCR2A = 249;
+	TCCR2A |= (1 << WGM21);
+	TCCR2B |= (1 << CS22) | (1 << CS20) | (1 << CS21);
+	TIMSK2 |= (1 << OCIE2A);
 }
 uint32_t seconds_get()
 {
@@ -113,34 +118,44 @@ uint32_t seconds_get()
 	}
 	return sec;
 }
-uint8_t poll_DoorClose()		//declaring a debounce function
+uint8_t DoorClose()		//declaring a debounce function
 {
 	if (!bit_is_clear(PINC, Door_Pin)) {      /* button is pressed now */
-		_delay_ms(200);
+		_delay_ms(100);
 		if (!bit_is_clear(PINC, Door_Pin)) {            /* still pressed */
 			return (1);
 		}
 	}
 	return(0);
 }
-uint8_t poll_DoorOpen()		//declaring a debounce function
+uint8_t DoorOpen()		//declaring a debounce function
 {
 	if (bit_is_clear(PINC, Door_Pin)) {      /* button is pressed now */
-		_delay_ms(200);
+		_delay_ms(100);
 		if (bit_is_clear(PINC, Door_Pin)) {            /* still pressed */
 			return (1);
 		}
 	}
 	return(0);
 }
-uint8_t poll_btn() {
+uint8_t BtnStart() {
 	if (bit_is_clear(PIND, BUTTON)) {      /* button is pressed now */
-		_delay_ms(20);
+		_delay_ms(300);
 		if (bit_is_clear(PIND, BUTTON)) {            /* still pressed */
 			return (1);
 		}
 	}
 	return(0);
+}
+uint8_t Handbrake() {
+	if (integrator == 0) {
+		output = 0;
+	}
+	else if (integrator >= DEBOUNCECYCLES) {
+		integrator = DEBOUNCECYCLES;
+		output = 1;
+	}
+	return(output);
 }
 double TempRead(){
 	TSDS18x20 DS18x20;
@@ -155,42 +170,37 @@ double TempRead(){
 void SecurityON(){
 	timeStartSecurity = seconds_get();
 	tempFlagSec = 1;
-	cntVibro1 = 0;
-	timeStartFirstCnt = 0;
-	flagVibro1 = 0;	
-	USART_SendString("Press SecurityON\r\n");	
+	cntShock1 = 0;
 	if (bit_is_clear(PIND, GENERATOR))
 	{
 		setBit(OUT_B_PORT, VOICE_RELAY);
 		_delay_ms(300);
 		clearBit(OUT_B_PORT, VOICE_RELAY);
-	} else{
-		setBit(GICR, INT0);
+		} else{
 		setBit(OUT_B_PORT, Blink_RELAY);
-		_delay_ms(500);
-		clearBit(OUT_B_PORT, Blink_RELAY);	
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, Blink_RELAY);
 	}
+	//USART_SendString("Press SecurityON\r\n");
 }
 void SecurityOFF(){
 	clearBit(OUT_B_PORT, Blink_RELAY);
 	clearBit(OUT_B_PORT, VOICE_RELAY);
 	clearBit(OUT_B_PORT, LED_Pin);
-	clearBit(GICR, INT0);
+	clearBit(EIMSK, INT0);
 	clearBit(OUT_B_PORT, BLOCK);
 	security = 0;
 	flagAlarm = 0;
-	cntVibro1 = 0;
-	timeStartFirstCnt = 0;
-	flagVibro1 = 0;
+	cntShock1 = 0;
 	tempFlagSec = 0;
-	setBit(OUT_B_PORT, Blink_RELAY);
-	_delay_ms(300);
-	clearBit(OUT_B_PORT, Blink_RELAY);
-	_delay_ms(300);
-	setBit(OUT_B_PORT, Blink_RELAY);
-	_delay_ms(300);
-	clearBit(OUT_B_PORT, Blink_RELAY);
-	if (bit_is_clear(PIND, GENERATOR))
+	wdt_reset();
+	if (memory == MEMORY_LITE)
+	{
+		setBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(600);
+		clearBit(OUT_B_PORT, VOICE_RELAY);
+	}
+	else if (memory == MEMORY_HARD)
 	{
 		setBit(OUT_B_PORT, VOICE_RELAY);
 		_delay_ms(300);
@@ -200,7 +210,34 @@ void SecurityOFF(){
 		_delay_ms(300);
 		clearBit(OUT_B_PORT, VOICE_RELAY);
 	}
-	USART_SendString("Security off\r\n");
+	else if (memory == MEMORY_DOOR)
+	{
+		setBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(300);
+		setBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(300);
+		setBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, VOICE_RELAY);
+		} else if (bit_is_clear(PIND, GENERATOR)){
+		setBit(OUT_B_PORT, VOICE_RELAY);
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, VOICE_RELAY);
+		} else {
+		setBit(OUT_B_PORT, Blink_RELAY);
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, Blink_RELAY);
+		_delay_ms(300);
+		setBit(OUT_B_PORT, Blink_RELAY);
+		_delay_ms(300);
+		clearBit(OUT_B_PORT, Blink_RELAY);
+	}
+	memory = 0;
+	//USART_SendString("Security off\r\n");
 }
 void ResetPresets(){
 	allPresets = 0;
@@ -210,27 +247,24 @@ void ResetPresets(){
 	clearBit(OUT_B_PORT, VOICE_RELAY);
 	clearBit(OUT_B_PORT, ON_ING);
 }
-void PresetsManual() {
-	if (allPresets == 0 && flagOnePresets == 1 && (seconds_get() > timerOnePresets + PERIOD_PRESETS)){
+void PresetsMT() {
+	if (!allPresets && flagOnePresets && (seconds_get() > timerOnePresets + PERIOD_PRESETS)){
 		ResetPresets();
-		USART_SendString("All reset timer\r\n");
-		setBit(OUT_B_PORT, LED_Pin);
-		_delay_ms(300);
-		clearBit(OUT_B_PORT, LED_Pin);
+		//USART_SendString("All reset timer\r\n");
 	}
-	if (flagOnePresets == 0 && bit_is_clear(PIND, STOP_Pin) && bit_is_clear(PINC, Ignition_IN) && bit_is_clear(PIND, GENERATOR) && poll_DoorClose())
+	if (!flagOnePresets && bit_is_clear(PINC, Ignition_IN) && bit_is_clear(PIND, GENERATOR) && DoorClose() && Handbrake())
 	{
 		setBit(OUT_B_PORT, ON_ING);
 		flagOnePresets = 1;
 		timerOnePresets = seconds_get();
-		USART_SendString("One\r\n");
+		//USART_SendString("One\r\n");
 	}
-	if (flagOnePresets == 1 && flagTwoPresets == 0 && bit_is_clear(PIND, STOP_Pin) && poll_DoorOpen())
+	if (flagOnePresets && !flagTwoPresets && bit_is_clear(PIND, STOP_Pin) && DoorOpen())
 	{
 		flagTwoPresets = 1;
-		USART_SendString("Two \r\n");
+		//USART_SendString("Two \r\n");
 	}
-	if (flagTwoPresets == 1 && allPresets == 0 && bit_is_clear(PIND, STOP_Pin) && poll_DoorClose())
+	if (flagTwoPresets && !allPresets && bit_is_clear(PIND, STOP_Pin) && DoorClose())
 	{
 		allPresets = 1;
 		flagOnePresets = 0;
@@ -238,19 +272,11 @@ void PresetsManual() {
 		setBit(OUT_B_PORT, LED_Pin);
 		_delay_ms(300);
 		clearBit(OUT_B_PORT, LED_Pin);
-		USART_SendString("All presets \r\n");
 	}
-	if (flagOnePresets == 1 && (!bit_is_clear(PIND, STOP_Pin) || !bit_is_clear(PIND, GENERATOR)))
+	if (flagOnePresets && (!Handbrake() || !bit_is_clear(PIND, GENERATOR)))
 	{
 		ResetPresets();
-		USART_SendString("Manual reset\r\n");
 	}
-	if (allPresets == 1 && poll_DoorOpen())
-	{
-		ResetPresets();
-		USART_SendString("Door reset\r\n");
-	}
-
 }
 void HeatingStop() {
 	clearBit(OUT_B_PORT, ON_ING);
@@ -261,14 +287,16 @@ void HeatingStop() {
 	//USART_SendString("HeatingStop\r\n");
 	clearBit(OUT_B_PORT, LED_Pin);
 	timerHeating = 0;
-	timeStarterON = 0;
+	_delay_ms(500);
 }
 void EngineStart(int cnt) {
 	uint8_t count = 0;
 	uint8_t maxTimeStarter = 5; //starter operating time sec
+	uint32_t timeStarterON;
+	
 	clearBit(OUT_B_PORT, BLOCK);
-	wdt_disable();
 	while (count < cnt && !bit_is_clear(PINC, Ignition_IN) && bit_is_clear(PIND, STOP_Pin) && !bit_is_clear(PIND, GENERATOR)){
+		wdt_reset();
 		count++;
 		setBit(OUT_B_PORT, LED_Pin);
 		setBit(OUT_B_PORT, ON_ING);         //on ignition 4 sec
@@ -282,23 +310,27 @@ void EngineStart(int cnt) {
 			temp = TempRead();
 			int z = map(temp, 0, -25, 0, 5);
 			for(; z > 0 ; z--){
+				wdt_reset();
 				clearBit(OUT_B_PORT, ON_ING);
-				_delay_ms(1900);
-				if (poll_btn())
+				_delay_ms(2000);
+				if (BtnStart())
 				{
 					heating = 0;
+					timeStarterON = 0;
 					HeatingStop();
 				}
+				wdt_reset();
 				setBit(OUT_B_PORT, ON_ING);
-				_delay_ms(6000);
-				if (poll_btn())
+				_delay_ms(5000);
+				if (BtnStart())
 				{
 					heating = 0;
+					timeStarterON = 0;
 					HeatingStop();
 				}
 			}
 		}
-		if(bit_is_clear(PIND, STOP_Pin)) //If switch is pressed
+		if(Handbrake()) //If switch is pressed
 		{
 			setBit(OUT_B_PORT, Blink_RELAY);
 			setBit(OUT_B_PORT, VOICE_RELAY);
@@ -311,48 +343,42 @@ void EngineStart(int cnt) {
 			_delay_ms(500);
 			clearBit(OUT_B_PORT, Blink_RELAY);
 			clearBit(OUT_B_PORT, VOICE_RELAY);
-			timeStarterON = seconds_get();
-			
+			timeStarterON = seconds_get();		
 			setBit(OUT_B_PORT, STARTER);
 			//USART_SendString("starter on\r\n");
 			} else {
 			HeatingStop();
+			timeStarterON = 0;
 			heating = 0;
 			count = 0;
 			break;
 		}
-		
+		wdt_disable();
 		while (!bit_is_clear(PIND, GENERATOR) && (seconds_get() < (timeStarterON + maxTimeStarter)) && bit_is_clear(PIND, STOP_Pin)){}
 		_delay_ms (100);
+		wdt_enable(WDTO_8S);
 		clearBit(OUT_B_PORT, STARTER);
 		if (bit_is_clear(PIND, GENERATOR))
 		{
 			timerHeating = seconds_get();
 			startOK = 1;
-			Timer_alarm = 0;
+			//USART_SendString("startOK\r\n");
 			clearBit(OUT_B_PORT, Blink_RELAY);
-			wdt_enable(WDTO_2S);
 			break;
 		}
 		//USART_SendString("starter off, wait 6 sec\r\n");
 		maxTimeStarter = maxTimeStarter + 1;                             // + 1 sec
+		wdt_reset();
 		HeatingStop();
 		_delay_ms (5000);
 	}
 	if (startOK == 0)
 	{
-		//USART_SendString("heating = 0\r\n");
 		heating = 0;
 		clearBit(OUT_B_PORT, Blink_RELAY);
 		clearBit(OUT_B_PORT, VOICE_RELAY);
-		if (security == 1)
-		{
-			setBit(GICR, INT0);
-			setBit(OUT_B_PORT, BLOCK);
-		}
 	}
-	wdt_enable(WDTO_2S);
-	//USART_SendString("quit of starting\r\n");
+	//USART_SendString("quit\r\n");
 }
 void Alarm(){
 	timeAlarmStart = seconds_get();
@@ -361,97 +387,64 @@ void Alarm(){
 	timerHeating = 0;
 	heating = 0;
 	flagBlinkShock = 0;
-	Timer_alarm = 0;
 	clearBit(OUT_B_PORT, Blink_RELAY);
 	clearBit(OUT_B_PORT, VOICE_RELAY);
 	clearBit(OUT_B_PORT, STARTER);
 	clearBit(OUT_B_PORT, ON_ING);
 	setBit(OUT_B_PORT, BLOCK);
-	clearBit(GICR, INT0); // off vibro1
-
+	clearBit(EIMSK, INT0); // off shock sensor lite
 }
 void ShockSensor(){
-	if (!flagAlarm && flagVibro1 == 0 && bit_is_clear(PIND, SHOCK_Sensor_Hard))
+	if (cntShock1 > 0 && !flagAlarm)
 	{
-		Alarm();
-	}
-	if (flagVibro1 == 1)
-	{
-		if (!flagAlarm && bit_is_clear(PIND, SHOCK_Sensor_Hard))
+		setBit(OUT_B_PORT, BLOCK);
+		uint32_t now = seconds_get();
+		if (cntShock1 == 1)
+		{
+			if (flagBlinkShock == 0)
+			{
+				timeStartFirstCnt = now + LOCK_TIME_SHOCK;		
+				setBit(OUT_B_PORT, Blink_RELAY);
+				setBit(OUT_B_PORT, VOICE_RELAY);
+				_delay_ms(300);
+				clearBit(OUT_B_PORT, Blink_RELAY);
+				clearBit(OUT_B_PORT, VOICE_RELAY);
+				flagBlinkShock = 1;
+				memory = MEMORY_LITE;
+			}
+		}
+		if (now > timeStartFirstCnt)
+		{
+			if (cntShock1 < MAX_CNT_SHOCK)
+			{
+				flagBlinkShock = 0;
+			}
+			else {
+				timeStartFirstCnt = now + LOCK_TIME_SHOCK;
+			}
+			cntShock1 = 0;
+		}
+		setBit(EIMSK, INT0);
+		if (bit_is_clear(PIND, SHOCK_Sensor_Hard))
 		{
 			Alarm();
-		}
-		if (cntVibro1 > 0 && cntVibro1 < MAX_CNT_SHOCK && flagBlinkShock == 1)
-		{
-			flagBlinkShock = 0;
-			setBit(OUT_B_PORT, BLOCK);
-			setBit(OUT_B_PORT, Blink_RELAY);
-			setBit(OUT_B_PORT, VOICE_RELAY);
-			_delay_ms(300);
-			clearBit(OUT_B_PORT, Blink_RELAY);
-			clearBit(OUT_B_PORT, VOICE_RELAY);
-			setBit(GICR, INT0); // on vibro1
-			USART_SendString("shock\r\n");
-		}
-		if (cntVibro1 >= MAX_CNT_SHOCK && (seconds_get() > timeStartFirstCnt + MAX_TIME_SHOCK)){
-			timeOverCnt = seconds_get();
-			//cntVibro1 = 0;
-			//timeStartFirstCnt = 0;
-			flagVibro1 = 0;
-			flag2Vibro1 = 1;
-			clearBit(GICR, INT0);
-			USART_SendString("lite off\r\n");
+			memory = MEMORY_HARD;
 		}
 	}
-
-	if (flag2Vibro1 == 1 && (seconds_get() > timeOverCnt + LOCK_TIME_SHOCK))
-	{
-		timeOverCnt = 0;
-		flag2Vibro1 = 0;
-		timeStartFirstCnt = 0;
-		cntVibro1 = 0;
-		setBit(GICR, INT0);
-		USART_SendString("lite on\r\n");
-	}
-	
 }
 
 int main(void){
-	DDRB |= _BV(BLOCK);//out
-	DDRB |= _BV(ON_ING);
-	DDRB |= _BV(STARTER);
-	DDRB |= _BV(Blink_RELAY);
-	DDRB |= _BV(LED_Pin);
-	DDRB |= _BV(VOICE_RELAY);
+	DDRB = 0xff; //out
+	DDRD = 0x00; //in
+	DDRC = 0x00; //in
 	
-	DDRD &= ~_BV(AUTOMAT);//in
-	DDRD &= ~_BV(STOP_Pin);
-	DDRD &= ~_BV(BUTTON);
-	DDRD &= ~_BV(GENERATOR);
-	DDRD &= ~_BV(SHOCK_Sensor_Lite);
-	DDRD &= ~_BV(SHOCK_Sensor_Hard);
-	DDRD &= ~_BV(NAKAL_ON_OFF);
-	
-	DDRC &= ~_BV(Ignition_IN);
-	DDRC &= ~_BV(Diable_SECURITY);
-	DDRC &= ~_BV(Enable_SECURITY);
-	DDRC &= ~_BV(Door_Pin);
-	//DDRC &= ~_BV(ACC_Pin);
-	
-	PORTB &= ~(1 << BLOCK) | ~(1 << ON_ING) | ~(1 << STARTER) | ~(1 << Blink_RELAY) | ~(1 << LED_Pin) | ~(1 << VOICE_RELAY); //0
-	PORTD  |= (1 << AUTOMAT) | (1 << STOP_Pin) | (1 << BUTTON) | (1 << GENERATOR) | (1 << SHOCK_Sensor_Lite) | (1 << SHOCK_Sensor_Hard) | (1 << NAKAL_ON_OFF);//1
-	PORTC  |= (1 << Diable_SECURITY) | (1 << Enable_SECURITY) | (1 << Door_Pin)/* | (1 << ACC_Pin)*/ | (1 << Ignition_IN);
-	timer0_init();
-	timer1_init();
-	timer2_init();
-	USART_Init();
-	MCUCR |= (1 << ISC01);
-	wdt_enable(WDTO_2S);
-	sei();
-	//USART_SendString("Start\r");
+	PORTB = 0x00; //0
+	PORTD = 0xff; //1
+	PORTC = 0xff; //1
 	if (!bit_is_clear(PIND, AUTOMAT))
 	{
 		autoTransmission = 1;
+		allPresets = 1;
 	}
 	if (!bit_is_clear(PIND, NAKAL_ON_OFF))
 	{
@@ -460,26 +453,46 @@ int main(void){
 	setBit(OUT_B_PORT, LED_Pin);
 	_delay_ms(500);
 	clearBit(OUT_B_PORT, LED_Pin);
+	timer0_init();
+	timer1_init();
+	timer2_init();
+	USART_Init();
+	EICRA |= (1 << ISC01);
+	wdt_enable(WDTO_8S);
+	sei();
 	for (;;)
 	{
 		wdt_reset();
 		if (heating == 1)
 		{
-			if (seconds_get() > timerHeating + HEATING_TIMER || !bit_is_clear(PIND, STOP_Pin) || poll_btn() || (startOK && !bit_is_clear(PIND, GENERATOR))){
+			if (seconds_get() > timerHeating + HEATING_TIMER || !Handbrake() || BtnStart()){
 				HeatingStop();
 				//USART_SendString("Heating stop timer\r\n");
 				heating = 0;
-				if (security == 1)
+				if (security)
 				{
-					setBit(GICR, INT0);
-					setBit(OUT_B_PORT, BLOCK);
+					cntShock1 = 0;
+					flagBlinkShock = 0;
+					setBit(EIMSK, INT0);
 				}
 			}
-			if (security == 1)
+			if (startOK && !bit_is_clear(PIND, GENERATOR))
 			{
-				if (!flagAlarm && poll_DoorOpen())
+				HeatingStop();
+				heating = 0;
+				if (security)
+				{
+					cntShock1 = 0;
+					flagBlinkShock = 0;
+					setBit(EIMSK, INT0);
+				}
+			}
+			if (security)
+			{
+				if (!flagAlarm && DoorOpen())
 				{
 					Alarm();
+					memory = MEMORY_DOOR;
 				}
 				if (bit_is_clear(PINC, Diable_SECURITY))
 				{
@@ -492,55 +505,56 @@ int main(void){
 					clearBit(OUT_B_PORT, Blink_RELAY);
 					clearBit(OUT_B_PORT, VOICE_RELAY);
 					clearBit(OUT_B_PORT, LED_Pin);
-					setBit(GICR, INT0);
+					cntTimer2 = 0;
+					flagBlinkShock = 0;
+					setBit(EIMSK, INT0);
 				}
 			}
 			if (!security)
 			{
-				if (!tempFlagSec && bit_is_clear(PINC, Enable_SECURITY) && poll_DoorClose())
+				if (!tempFlagSec && bit_is_clear(PINC, Enable_SECURITY) && DoorClose())
 				{
 					SecurityON();
 
 				}
-				if (tempFlagSec && (seconds_get() > timeStartSecurity + DELAY_START_SECURITY))
+				if (tempFlagSec)
 				{
-					tempFlagSec = 0;
-					security = 1;
-					USART_SendString("SecurityON\r\n");
-				}
-				if (tempFlagSec && bit_is_clear(PINC, Diable_SECURITY))
-				{
-					SecurityOFF();
+					if (seconds_get() > timeStartSecurity + DELAY_START_SECURITY)
+					{
+						tempFlagSec = 0;
+						security = 1;
+					}
+					if (bit_is_clear(PINC, Diable_SECURITY))
+					{
+						SecurityOFF();
+					}
 				}
 			}
 		}
 		if (heating == 0)
 		{
-			if (!autoTransmission)
+			if (allPresets && DoorOpen())
 			{
-				PresetsManual();
+				ResetPresets();
 			}
-			if (allPresets == 1 && !flagAlarm && poll_btn() && !bit_is_clear(PINC, Ignition_IN) && !bit_is_clear(PIND, GENERATOR)) {
-				heating = 1;
-				clearBit(GICR, INT0);
-				//USART_SendString("command - start!\r\n");
-				EngineStart(3);
-			}
-			if (security == 1)
+			if (security)
 			{
 				ShockSensor();
-				if (!flagAlarm && poll_DoorOpen())
+				if (!flagAlarm && DoorOpen())
 				{
 					Alarm();
+					memory = MEMORY_DOOR;
 				}
 				if (flagAlarm && seconds_get() > timeAlarmStart + ALARM_TIMER)
 				{
 					timeAlarmStart = 0;
 					flagAlarm = 0;
+					cntTimer2 = 0;
+					flagBlinkShock = 0;
 					clearBit(OUT_B_PORT, Blink_RELAY);
 					clearBit(OUT_B_PORT, VOICE_RELAY);
 					clearBit(OUT_B_PORT, LED_Pin);
-					setBit(GICR, INT0);
+					setBit(EIMSK, INT0);
 				}
 				if (bit_is_clear(PINC, Diable_SECURITY))
 				{
@@ -549,80 +563,89 @@ int main(void){
 			}
 			if (!security)
 			{
-				if (!tempFlagSec && !bit_is_clear(PINC, Ignition_IN) && bit_is_clear(PINC, Enable_SECURITY) && poll_DoorClose())
+				if (!autoTransmission && !allPresets)
+				{
+					PresetsMT();
+				}
+				if (!tempFlagSec && !bit_is_clear(PINC, Ignition_IN) && bit_is_clear(PINC, Enable_SECURITY) && !bit_is_clear(PINC, Door_Pin))
 				{
 					SecurityON();
 
 				}
-				if (tempFlagSec && (seconds_get() > timeStartSecurity + DELAY_START_SECURITY))
+				if (tempFlagSec)
 				{
-					tempFlagSec = 0;
-					security = 1;
-					USART_SendString("SecurityON\r\n");
+					if (seconds_get() > timeStartSecurity + DELAY_START_SECURITY)
+					{
+						tempFlagSec = 0;
+						security = 1;
+						cntTimer2 = 0;
+						flagBlinkShock = 0;
+						setBit(EIMSK, INT0);
+					}
+					if (bit_is_clear(PINC, Diable_SECURITY))
+					{
+						SecurityOFF();
+					}
 				}
-				if (tempFlagSec && bit_is_clear(PINC, Diable_SECURITY))
-				{
-					SecurityOFF();
-				}
+			}
+			if (allPresets && !flagAlarm && BtnStart() && !bit_is_clear(PINC, Ignition_IN) && !bit_is_clear(PIND, GENERATOR)) {
+				heating = 1;
+				clearBit(EIMSK, INT0);
+				//USART_SendString("command - start!\r\n");
+				EngineStart(3);
 			}
 		}
 	}
 }
 
-ISR (INT0_vect) //sensor lite
+ISR(INT0_vect) //sensor lite
 {
-	if (heating == 0){
-		clearBit(GICR, INT0);
-		//wdt_reset();
-		uint16_t timer = 0;
+	if (!heating){
+		clearBit(EIMSK, INT0);
+		uint8_t timer = 0;
 		while(bit_is_clear(PIND, PD2)) { // button hold down
 			timer++; // count how long button is pressed
 			_delay_ms(1);
-			if (timer > 800UL)
+			if (timer > BTN_DEBOUCE)
 			{
+				++cntShock1;
 				break;
 			}
 		}
-		if(timer > BTN_DEBOUCE) { // software debouncing button
-				++cntVibro1;
-				flagBlinkShock = 1;
-				if (cntVibro1 == 1)
-				{
-					timeStartFirstCnt = seconds_get();
-					flagVibro1 = 1;
-				}
-		}
 	}
 }
-ISR(TIMER0_OVF_vect){	//alarm
-	TCNT0 += 6;
-	milliseconds ++;
-	tempmilliseconds ++;
-	if (tempmilliseconds > 999)
-	{
-		seconds++;
-		tempmilliseconds = 0;
-		USART_Write_Int(cntVibro1);
-		USART_SendString("\r\n");
+ISR(TIMER0_COMPA_vect){
+	if (!bit_is_clear(PIND, STOP_Pin)) {
+		if (integrator > 0) {
+			integrator--;
+		}
+		} else if (integrator < DEBOUNCECYCLES) {
+		integrator++;
 	}
 }
 ISR(TIMER1_COMPA_vect)
 {
-	if (security)
-	{
-		toggleBit(OUT_B_PORT, LED_Pin);
-	}
-	if (flagAlarm)
-	{
-		toggleBit(OUT_B_PORT, Blink_RELAY);
-		toggleBit(OUT_B_PORT, VOICE_RELAY);
-	}
-	else if (startOK)
-	{
-		toggleBit(OUT_B_PORT, Blink_RELAY);
-		Timer_alarm = 0;
-	}
+	seconds++;
+	//USART_Write_Int(cntShock1);
 }
-ISR (TIMER2_COMP_vect)
-{	
+ISR(TIMER2_COMPA_vect)
+{
+	cntTimer2++;
+	if (cntTimer2 > 31)// 496ms
+	{
+		cntTimer2 = 0;
+		if (security)
+		{
+			toggleBit(OUT_B_PORT, LED_Pin);
+		}
+		if (flagAlarm)
+		{
+			toggleBit(OUT_B_PORT, Blink_RELAY);
+			toggleBit(OUT_B_PORT, VOICE_RELAY);
+		}
+		else if (startOK)
+		{
+			toggleBit(OUT_B_PORT, Blink_RELAY);
+		}
+	}
 }
